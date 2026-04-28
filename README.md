@@ -31,16 +31,16 @@ streamlit run app.py```
 
 
 ## 交易日志录入
-![界面](images/1.inputlog.png)
+![界面](images/inputlog.png)
 
 ## 交易日志列表
-![界面](images/2.loglist.png)
+![界面](images/loglist.png)
 
 ## 修改/删除日志
-![界面](images/3.changelog.png)
+![界面](images/changelog.png)
 
 ## 期权平仓日志
-![界面](images/4.closelog.png)
+![界面](images/closelog.png)
 
 
 
