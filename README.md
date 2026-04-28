@@ -26,7 +26,8 @@
 ```bash
 cd D:\apps\OptionsTradingLog
 pip install -r requirements.txt
-streamlit run app.py```
+streamlit run app.py
+```
 
 
 
