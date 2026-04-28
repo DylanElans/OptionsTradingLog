@@ -1,4 +1,4 @@
-# TradingLog
+# 期权交易记录日志  Base  on Python for Win10
 
 期权交易日志系统，基于：
 - Streamlit
@@ -27,3 +27,24 @@
 cd D:\apps\OptionsTradingLog
 pip install -r requirements.txt
 streamlit run app.py```
+
+
+
+## 交易日志录入
+![界面](images/1. inputlog.png)
+
+## 交易日志列表
+![界面](images/2. loglist.png)
+
+## 修改/删除日志
+![界面](images/3. changelog.png)
+
+## 期权平仓日志
+![界面](images/4. closelog.png)
+
+
+
+
+
+
+
