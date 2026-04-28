@@ -1,4 +1,4 @@
-# 期权交易记录日志  Base  on Python for Win10
+# 期权交易记录日志
 
 期权交易日志系统，基于：
 - Streamlit
