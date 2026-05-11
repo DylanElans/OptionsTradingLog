@@ -124,7 +124,7 @@ if "pending_nav" in st.session_state:
 nav_options = ["录入交易日志", "交易日志显示", "修改交易日志", "交易日志回填", "日志回收站", "资金流水录入", "资金流水查看", "统计总结"]
 
 if "nav_page" not in st.session_state or st.session_state["nav_page"] not in nav_options:
-    st.session_state["nav_page"] = "录入交易日志"
+    st.session_state["nav_page"] = "交易日志显示"
 
 page = st.sidebar.radio("导航", nav_options, key="nav_page")
 
@@ -150,6 +150,8 @@ if "last_deleted_trade_id" not in st.session_state:
     st.session_state.last_deleted_trade_id = None
 if "last_deleted_trade_label" not in st.session_state:
     st.session_state.last_deleted_trade_label = ""
+if "show_related_contract_dialog_trade_id" not in st.session_state:
+    st.session_state.show_related_contract_dialog_trade_id = None
 
 
 def as_date(value, fallback=None):
@@ -264,9 +266,41 @@ def render_detail_cards(detail_row: pd.Series, show_review: bool = True, columns
     if detail_row is None or detail_row.empty:
         return
 
+    # def val(field: str, default: str = ""):
+    #     v = detail_row.get(field, default)
+    #     return "" if pd.isna(v) else str(v)
     def val(field: str, default: str = ""):
         v = detail_row.get(field, default)
-        return "" if pd.isna(v) else str(v)
+        if pd.isna(v):
+            return ""
+
+        # 金额类字段：固定显示 2 位小数
+        money_fields = {
+            "premium",
+            "gross_amount",
+            "fees",
+            "net_cash_flow",
+            "closed_pnl",
+            "max_profit",
+            "max_loss",
+            "margin_req",
+            "buying_power_effect",
+            "break_even",
+            "share_price_at_trans",
+            "strike_price",
+            "strike_price_2",
+            "strike_price_3",
+            "strike_price_4"
+        }
+
+        if field in money_fields:
+            try:
+                return f"{float(v):.2f}"
+            except Exception:
+                return str(v)
+        return str(v)
+
+
 
     groups = {
         "基本信息": [
@@ -281,6 +315,7 @@ def render_detail_cards(detail_row: pd.Series, show_review: bool = True, columns
             ("执行价1", val("strike_price")), ("执行价2", val("strike_price_2")),
             ("执行价3", val("strike_price_3")), ("执行价4", val("strike_price_4")),
             ("方向", val("option_right")), ("DTE", val("dte")),
+            ("关联合约", format_related_trade_text(int(detail_row.get("id")))),
             ("开仓理由", val("entry_reason")),
             ("退出计划", val("exit_plan")),
             ("滚动计划", val("roll_plan")),
@@ -313,11 +348,35 @@ def render_detail_cards(detail_row: pd.Series, show_review: bool = True, columns
     for title, items in groups.items():
         shown = [(k, v) for k, v in items if str(v).strip()]
         if not shown: continue
-        rows_html = "".join(
-            f'<div class="detail-card-row"><div class="detail-card-label">{html.escape(k)}</div>'
-            f'<div class="detail-card-value">{html.escape(v)}</div></div>'
-            for k, v in shown
-        )
+        # rows_html = "".join(
+        #     f'<div class="detail-card-row"><div class="detail-card-label">{html.escape(k)}</div>'
+        #     f'<div class="detail-card-value">{html.escape(v)}</div></div>'
+        #     for k, v in shown
+        # )
+        rows_html_parts = []
+        current_trade_id = int(detail_row.get("id"))
+
+        for k, v in shown:
+            value_style = ""
+
+            if k == "净现金流":
+                try:
+                    num_value = float(str(v).replace(",", ""))
+                    if num_value < 0:
+                        value_style = "color:#16a34a;"
+                except Exception:
+                    pass
+
+            label_html = html.escape(k)
+
+            rows_html_parts.append(
+                f'<div class="detail-card-row">'
+                f'<div class="detail-card-label">{label_html}</div>'
+                f'<div class="detail-card-value" style="{value_style}">{html.escape(str(v))}</div>'
+                f'</div>'
+            )
+
+        rows_html = "".join(rows_html_parts)
         cards_html.append(f'<div class="detail-card"><div class="detail-card-title">{html.escape(title)}</div>{rows_html}</div>')
 
     st.markdown(f'<div class="{grid_class}">{"".join(cards_html)}</div>', unsafe_allow_html=True)
@@ -343,6 +402,149 @@ def edit_review_dialog(trade_id: int, current_note: str):
 
     if col2.button("❌ 取消", use_container_width=True):
         st.session_state.show_review_dialog_trade_id = None
+        st.rerun()
+
+
+@st.dialog("管理关联合约")
+def related_contract_dialog(trade_id: int):
+    ensure_related_trade_column()
+
+    current_df = get_trade_by_id(int(trade_id))
+    if current_df.empty:
+        st.warning("未找到当前交易。")
+        return
+
+    current = current_df.iloc[0]
+    ticker = str(current.get("ticker") or "")
+    position_id = str(current.get("position_id") or current.get("id"))
+
+    st.write(f"当前合约：**{position_id} / {ticker}**")
+
+    # 显示当前已关联的合约信息
+    current_related_text = format_related_trade_text(int(trade_id))
+    if current_related_text == "未关联":
+        st.info("当前已关联：未关联")
+    else:
+        st.info(f"当前已关联：{current_related_text}")
+
+    candidates = get_related_candidates(int(trade_id))
+
+    if candidates.empty:
+        st.info("暂无可关联的同标的 OPEN 合约。")
+        if st.button("关闭", use_container_width=True):
+            st.session_state.show_related_contract_dialog_trade_id = None
+            try:
+                if "manage_related_trade_id" in st.query_params:
+                    del st.query_params["manage_related_trade_id"]
+            except Exception:
+                pass
+            st.rerun()
+        return
+
+    current_related_id = None
+    if "related_trade_id" in current.index and not pd.isna(current.get("related_trade_id")):
+        try:
+            current_related_id = int(current.get("related_trade_id"))
+        except Exception:
+            current_related_id = None
+
+    # 兼容旧版单向关联：如果当前记录没有 related_trade_id，
+    # 但其他合约指向了当前记录，也把它识别为当前已关联对象。
+    if current_related_id is None:
+        related_row = get_related_trade_row(int(trade_id))
+        if related_row and related_row["id"] is not None:
+            try:
+                current_related_id = int(related_row["id"])
+            except Exception:
+                current_related_id = None
+
+    option_ids = candidates["id"].astype(int).tolist()
+
+    def candidate_label(row):
+        pid = row.get("position_id") or row.get("id")
+        strategy = str(row.get("option_strategy") or "")
+        status = row.get("result_status") or ""
+        qty = row.get("qty") or ""
+        strike_1 = row.get("strike_price") or ""
+
+        try:
+            strike_1 = f"{float(strike_1):.2f}" if strike_1 != "" else ""
+        except Exception:
+            strike_1 = str(strike_1)
+
+        return f"{pid} - {strategy} - {status} - {qty} - {strike_1}"
+
+    labels = {
+        int(row["id"]): candidate_label(row)
+        for _, row in candidates.iterrows()
+    }
+
+    default_index = 0
+    if current_related_id in option_ids:
+        default_index = option_ids.index(current_related_id)
+
+    selected_related_id = st.selectbox(
+        "选择要关联的原有合约",
+        options=option_ids,
+        index=default_index,
+        format_func=lambda x: labels.get(int(x), str(x)),
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    if col1.button("✅ 保存关联", type="primary", use_container_width=True):
+        set_related_trade(int(trade_id), int(selected_related_id))
+        st.session_state.show_related_contract_dialog_trade_id = None
+        try:
+            if "manage_related_trade_id" in st.query_params:
+                del st.query_params["manage_related_trade_id"]
+        except Exception:
+            pass
+        st.success("已保存关联合约。")
+        st.rerun()
+
+    if col2.button("🗑️ 删除关联", use_container_width=True):
+        set_related_trade(int(trade_id), None)
+        st.session_state.show_related_contract_dialog_trade_id = None
+        try:
+            if "manage_related_trade_id" in st.query_params:
+                del st.query_params["manage_related_trade_id"]
+        except Exception:
+            pass
+        st.success("已删除关联合约。")
+        st.rerun()
+
+    if col3.button("取消", use_container_width=True):
+        st.session_state.show_related_contract_dialog_trade_id = None
+        try:
+            if "manage_related_trade_id" in st.query_params:
+                del st.query_params["manage_related_trade_id"]
+        except Exception:
+            pass
+        st.rerun()
+
+
+def render_related_contract_link_button(trade_id: int):
+    """用 Streamlit 原生按钮打开关联合约弹窗。样式做成文字链接，避免 HTML 链接无法触发 Python 回调。"""
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stButton"] button[key^="manage_related_contract_btn_"] {
+            background: transparent !important;
+            border: none !important;
+            color: #2563eb !important;
+            text-decoration: underline !important;
+            padding: 0 !important;
+            min-height: 0 !important;
+            font-size: 14px !important;
+            font-weight: 400 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.button("🔗 管理关联合约", key=f"manage_related_contract_btn_{int(trade_id)}"):
+        st.session_state.show_related_contract_dialog_trade_id = int(trade_id)
         st.rerun()
 
 
@@ -431,6 +633,225 @@ def _sqlite_connect():
     conn = sqlite3.connect(_get_db_path_from_db_module())
     conn.row_factory = sqlite3.Row
     return conn
+
+
+
+def ensure_related_trade_column():
+    """为关联合约准备字段；已存在则忽略。"""
+    with _sqlite_connect() as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(trades)").fetchall()}
+        if "related_trade_id" not in cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN related_trade_id INTEGER")
+        conn.commit()
+
+
+def set_related_trade(trade_id: int, related_trade_id):
+    """
+    设置或清除关联合约。
+
+    规则：
+    - A 关联 B 后，同时写入 A -> B 和 B -> A。
+    - A 重新绑定 C 时，自动解除 A 原来的对手方，以及 C 原来的对手方。
+    - A 删除关联时，如果 B 正好关联 A，也同步清空 B。
+    """
+    ensure_related_trade_column()
+    trade_id = int(trade_id)
+    related_trade_id = int(related_trade_id) if related_trade_id is not None else None
+
+    if related_trade_id == trade_id:
+        return
+
+    with _sqlite_connect() as conn:
+        current = conn.execute(
+            "SELECT related_trade_id FROM trades WHERE id = ?",
+            (trade_id,),
+        ).fetchone()
+        old_related_id = None
+        if current and current["related_trade_id"] is not None:
+            old_related_id = int(current["related_trade_id"])
+
+        # 先解除当前合约原来的对手方。
+        if old_related_id is not None:
+            conn.execute(
+                "UPDATE trades SET related_trade_id = NULL WHERE id = ? AND related_trade_id = ?",
+                (old_related_id, trade_id),
+            )
+
+        # 如果只是删除关联，清空当前合约即可。
+        if related_trade_id is None:
+            conn.execute(
+                "UPDATE trades SET related_trade_id = NULL WHERE id = ?",
+                (trade_id,),
+            )
+            conn.commit()
+            return
+
+        # 如果目标合约原本关联了别人，也先解除那一边。
+        target = conn.execute(
+            "SELECT related_trade_id FROM trades WHERE id = ?",
+            (related_trade_id,),
+        ).fetchone()
+        target_old_related_id = None
+        if target and target["related_trade_id"] is not None:
+            target_old_related_id = int(target["related_trade_id"])
+
+        if target_old_related_id is not None and target_old_related_id != trade_id:
+            conn.execute(
+                "UPDATE trades SET related_trade_id = NULL WHERE id = ? AND related_trade_id = ?",
+                (target_old_related_id, related_trade_id),
+            )
+
+        # 写入双向绑定。
+        conn.execute(
+            "UPDATE trades SET related_trade_id = ? WHERE id = ?",
+            (related_trade_id, trade_id),
+        )
+        conn.execute(
+            "UPDATE trades SET related_trade_id = ? WHERE id = ?",
+            (trade_id, related_trade_id),
+        )
+        conn.commit()
+
+
+def get_related_trade_row(trade_id: int):
+    """读取当前交易关联的合约记录；兼容旧版单向关联数据。"""
+    ensure_related_trade_column()
+    with _sqlite_connect() as conn:
+        row = conn.execute(
+            """
+            SELECT r.*
+            FROM trades t
+            LEFT JOIN trades r ON r.id = t.related_trade_id
+            WHERE t.id = ?
+            """,
+            (int(trade_id),),
+        ).fetchone()
+
+        if row and row["id"] is not None:
+            return row
+
+        # 兼容旧数据：如果别人指向当前合约，也认为存在关联。
+        return conn.execute(
+            """
+            SELECT *
+            FROM trades
+            WHERE related_trade_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (int(trade_id),),
+        ).fetchone()
+
+
+def has_related_trade(trade_id: int) -> bool:
+    """判断交易是否有关联合约；兼容旧版单向关联数据。"""
+    row = get_related_trade_row(int(trade_id))
+    return bool(row and row["id"] is not None)
+
+
+def get_related_trade_icon(trade_id: int) -> str:
+    """关联合约统一使用同一个图标。"""
+    row = get_related_trade_row(int(trade_id))
+    if not row or row["id"] is None:
+        return ""
+    return "🔗"
+
+
+def get_related_trade_color(trade_id: int) -> str:
+    """
+    为不同关联对返回不同颜色。
+    同一对合约用同一个颜色；兼容旧版单向关联数据。
+    """
+    row = get_related_trade_row(int(trade_id))
+    if not row or row["id"] is None:
+        return ""
+
+    current_id = int(trade_id)
+    related_id = int(row["id"])
+    pair_a, pair_b = sorted([current_id, related_id])
+
+    colors = [
+        "#2563eb",  # blue
+        "#16a34a",  # green
+        "#dc2626",  # red
+        "#9333ea",  # purple
+        "#ea580c",  # orange
+        "#0891b2",  # cyan
+        "#be123c",  # rose
+        "#4f46e5",  # indigo
+        "#65a30d",  # lime
+        "#b45309",  # amber
+    ]
+    color_index = (pair_a * 31 + pair_b * 17) % len(colors)
+    return colors[color_index]
+
+
+def get_related_trade_icon_html(trade_id: int) -> str:
+    """返回可变色的关联合约图标 HTML。注意：emoji 图标本身通常不能被 CSS 改色，所以这里用 SVG 链接图标。"""
+    color = get_related_trade_color(int(trade_id))
+    if not color:
+        return ""
+
+    safe_color = html.escape(color)
+    return (
+        f'<span style="display:inline-flex;vertical-align:-2px;color:{safe_color};margin-left:4px;">'
+        f'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" '
+        f'xmlns="http://www.w3.org/2000/svg" aria-label="关联合约">'
+        f'<path d="M10.6 13.4a1.8 1.8 0 0 0 2.8 0l3.7-3.7a3.2 3.2 0 0 0-4.5-4.5l-1.1 1.1" '
+        f'stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>'
+        f'<path d="M13.4 10.6a1.8 1.8 0 0 0-2.8 0l-3.7 3.7a3.2 3.2 0 0 0 4.5 4.5l1.1-1.1" '
+        f'stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>'
+        f'</svg>'
+        f'</span>'
+    )
+
+
+def format_related_trade_text(trade_id: int) -> str:
+    """
+    显示格式：合约持仓ID - 策略 - 状态 - 数量 - 行权价1
+    """
+    row = get_related_trade_row(int(trade_id))
+    if not row or row["id"] is None:
+        return "未关联"
+
+    position_id = row["position_id"] or row["id"]
+    strategy = str(row["option_strategy"] or "")
+    status = row["result_status"] or ""
+    qty = row["qty"] or ""
+    strike_1 = row["strike_price"] or ""
+
+    try:
+        strike_1 = f"{float(strike_1):.2f}" if strike_1 != "" else ""
+    except Exception:
+        strike_1 = str(strike_1)
+
+    return f"{position_id} - {strategy} - {status} - {qty} - {strike_1}"
+
+
+def get_related_candidates(current_trade_id: int) -> pd.DataFrame:
+    """获取同标的 OPEN 状态原有合约，排除当前合约和已删除合约。"""
+    current_df = get_trade_by_id(int(current_trade_id))
+    if current_df.empty:
+        return pd.DataFrame()
+
+    current = current_df.iloc[0]
+    ticker = str(current.get("ticker") or "").strip().upper()
+    if not ticker:
+        return pd.DataFrame()
+
+    df = get_trades(
+        "ticker = :ticker AND result_status = :result_status",
+        {"ticker": ticker, "result_status": "OPEN"},
+    )
+
+    if df.empty:
+        return df
+
+    if "is_deleted" in df.columns:
+        df = df[pd.to_numeric(df["is_deleted"], errors="coerce").fillna(0).astype(int) == 0]
+
+    df = df[df["id"].astype(int) != int(current_trade_id)]
+    return df
 
 
 def ensure_soft_delete_columns():
@@ -729,6 +1150,17 @@ elif page == "日志回收站":
                 value = row.get(col, "")
                 if pd.isna(value):
                     value = ""
+
+                    # 金额类字段统一显示 2 位小数
+                    money_cols = {"net_cash_flow", "premium", "fees", "closed_pnl","strike_price","strike_price_2","strike_price_3","strike_price_4"}
+                    if col in money_cols and value != "":
+                      try:
+                         display_value = f"{float(value):.2f}"
+                      except Exception:
+                         display_value = str(value)
+                    else:
+                         display_value = str(value)
+
                 row_cols[i].markdown(
                     f'<div class="trade-row">{html.escape(str(value))}</div>',
                     unsafe_allow_html=True,
@@ -970,9 +1402,40 @@ elif page == "交易日志显示":
                 except Exception:
                     pass
 
+            if col == "net_cash_flow" and value != "":
+                 try:
+                     num_value = float(value)
+                     display_value = f"{num_value:.2f}"
+
+                     if num_value < 0:
+                         style_extra += "color:#16a34a;"
+                 except Exception:
+                     display_value = str(value)
+            else:
+                display_value = str(value)
+            
+            
+            # 金额类字段统一显示 2 位小数
+            money_cols = {"net_cash_flow", "premium", "fees", "closed_pnl","strike_price","strike_price_2","strike_price_3","strike_price_4"}
+
+            if col in money_cols and value != "":
+                try:
+                    display_value = f"{float(value):.2f}"
+                except Exception:
+                    display_value =str(value)
+            else:
+                display_value = str(value)
+
+            # 已关联合约的记录，在“标的”列增加统一“链接”图标；不同关联对使用不同颜色
+            display_html = html.escape(str(display_value))
+            if col == "ticker" and has_related_trade(rid):
+                related_icon_html = get_related_trade_icon_html(rid)
+                if related_icon_html:
+                    display_html = f'{html.escape(str(display_value))} {related_icon_html}'
+
             # 普通文本显示，不再给 position_id 增加链接
             row_cols[i].markdown(
-                f'<div class="{row_class}" style="{style_extra}">{html.escape(str(value))}</div>',
+                f'<div class="{row_class}" style="{style_extra}">{display_html}</div>',
                 unsafe_allow_html=True,
             )
 
@@ -989,8 +1452,8 @@ elif page == "交易日志显示":
             current_note = detail.iloc[0].get("review_note", "")
 
             if result_status == "OPEN":
-                # 未平仓：显示修改、编辑、平仓按钮
-                btn_cols = st.columns([2, 2, 2, 6])
+                # 未平仓：显示修改、编辑、平仓、关联合约按钮
+                btn_cols = st.columns([2, 2, 2, 2, 4])
                 if btn_cols[0].button("📝 修改交易日志", key=f"goto_edit_open_{trade_id}", type="primary"):
                     st.session_state.edit_trade_id = trade_id
                     try:
@@ -1009,6 +1472,10 @@ elif page == "交易日志显示":
                     except Exception:
                         pass
                     st.session_state["pending_nav"] = "交易日志回填"
+                    st.rerun()
+
+                if btn_cols[3].button("🔗 关联合约", key=f"manage_related_open_{trade_id}"):
+                    st.session_state.show_related_contract_dialog_trade_id = trade_id
                     st.rerun()
             else:
                 # 已平仓：修改、编辑、回填按钮
@@ -1033,10 +1500,17 @@ elif page == "交易日志显示":
                 else:
                     btn_cols[1].markdown("&nbsp;")
 
+                if btn_cols[2].button("🔗 关联合约", key=f"manage_related_closed_{trade_id}"):
+                    st.session_state.show_related_contract_dialog_trade_id = trade_id
+                    st.rerun()
+
 
             dialog_trade_id = st.session_state.get("show_review_dialog_trade_id")
             if dialog_trade_id == trade_id and result_status == "CLOSED":
                 edit_review_dialog(trade_id, current_note)
+
+            if st.session_state.get("show_related_contract_dialog_trade_id") == trade_id:
+                related_contract_dialog(trade_id)
 
 
 elif page == "修改交易日志":
@@ -1375,9 +1849,12 @@ elif page == "交易日志回填":
 
         c1, c2, c3, c4 = st.columns(4)
         closed_date = c1.date_input(req("平仓日期"), value=as_date(target_trade.get("closed_date"), date.today()), key=date_key)
-        current_result_status = str(target_trade.get("result_status") or "OPEN")
+        current_result_status = str(target_trade.get("result_status") or "CLOSED")
+        # 日志回填页面默认按“平仓”处理：OPEN 记录进入回填时，结果状态下拉框默认选 CLOSED
+        if current_result_status == "OPEN":
+            current_result_status = "CLOSED"
         if current_result_status not in RESULT_STATUSES:
-            current_result_status = "OPEN"
+            current_result_status = "CLOSED"
         result_status = c2.selectbox(req("结果状态"), RESULT_STATUSES, index=RESULT_STATUSES.index(current_result_status), key=result_key)
         assigned = c3.checkbox("是否被指派", value=bool(target_trade.get("assigned") or 0), key=assigned_key)
         execution_score = c4.selectbox(req("是否按计划执行"), EXECUTION_SCORES, index=EXECUTION_SCORES.index(str(target_trade.get("execution_score") or "YES")), key=exec_key)
