@@ -8,12 +8,15 @@ ACTION_LABELS = {
 }
 
 STRATEGY_LABELS = {
-    "CSP": "Cash Secured Put",
-    "CC": "Covered Call",
     "CALL": "Single Call",
     "PUT": "Single Put",
+    "CC": "Covered Call",
     "CALL_SPREAD": "Call Spread",
     "PUT_SPREAD": "Put Spread",
+    "COLLAR": "Collar",
+    "SYNTHETIC_SHORT": "Synthetic Short",
+    "SYNTHETIC_LONG": "Synthetic Long",
+    "CSP": "Cash Secured Put",
     "IRON_CONDOR": "Iron Condor",
     "STRANGLE": "Strangle",
     "STOCK": "Stock",
@@ -53,6 +56,9 @@ DEFAULT_SUB_TYPE_BY_STRATEGY = {
     "PUT_SPREAD": "DEBIT",
     "IRON_CONDOR": "CREDIT",
     "STRANGLE": "CREDIT",
+    "COLLAR": "CREDIT",
+    "SYNTHETIC_SHORT": "CREDIT",
+    "SYNTHETIC_LONG": "DEBIT",
 }
 
 

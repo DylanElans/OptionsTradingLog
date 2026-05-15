@@ -72,6 +72,8 @@ def infer_break_even(option_strategy: str, option_right: str, strike_price: floa
         return None
     if strategy == "CALL_SPREAD":
         return None
+    if strategy in {"COLLAR", "SYNTHETIC_SHORT", "SYNTHETIC_LONG"}:
+        return safe_float(share_price_at_trans, None)
     if right == "PUT" and strike is not None:
         return strike - prem
     if right == "CALL" and strike is not None:

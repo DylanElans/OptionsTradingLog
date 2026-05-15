@@ -116,6 +116,8 @@ div[data-testid="stButton"] button {
 
 init_db()
 
+COMBO_STRATEGIES = {"COLLAR", "SYNTHETIC_SHORT", "SYNTHETIC_LONG"}
+
 # ====================== 顶部导航跳转处理 ======================
 if "pending_nav" in st.session_state:
     st.session_state["nav_page"] = st.session_state["pending_nav"]
@@ -207,10 +209,43 @@ def display_ledger_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def get_sub_type_options_for_strategy(strategy: str) -> list[str]:
+    """根据策略限制子类型，避免录入时选到明显不匹配的 Credit/Debit。"""
+    strategy = (strategy or "").upper()
+    if strategy == "STOCK":
+        return []
+    if strategy in ["CSP", "CC", "IRON_CONDOR", "STRANGLE"]:
+        return ["CREDIT"]
+    if strategy in ["CALL", "PUT", "CALL_SPREAD", "PUT_SPREAD", "COLLAR", "SYNTHETIC_SHORT", "SYNTHETIC_LONG"]:
+        return ["DEBIT", "CREDIT"]
+    return list(SUB_TYPE_LABELS.keys())
+
+
+def get_action_options_for_strategy(strategy: str, sub_type: str | None = None) -> list[str]:
+    """根据策略和子类型限制动作。
+
+    说明：组合策略没有新增数据库字段，仍用 BTO/STO 表示组合净现金流方向：
+    - DEBIT -> BTO，代表净付权利金
+    - CREDIT -> STO，代表净收权利金
+    这样可以复用原 compute_net_cash_flow 逻辑。
+    """
+    strategy = (strategy or "").upper()
+    sub_type = (sub_type or "").upper()
+
+    if strategy == "STOCK":
+        return ["BUY_SHARES", "SELL_SHARES"]
+    if strategy in ["CSP", "CC", "IRON_CONDOR", "STRANGLE"]:
+        return ["STO"]
+    if strategy in ["CALL", "PUT", "CALL_SPREAD", "PUT_SPREAD", "COLLAR", "SYNTHETIC_SHORT", "SYNTHETIC_LONG"]:
+        return ["STO"] if sub_type == "CREDIT" else ["BTO"]
+    return list(ACTION_LABELS.keys())
+
+
 def get_default_option_right(strategy: str) -> str:
     if strategy == "STOCK": return "NONE"
     if strategy in ["PUT", "CSP", "PUT_SPREAD"]: return "PUT"
     if strategy in ["CALL", "CC", "CALL_SPREAD"]: return "CALL"
+    if strategy in ["COLLAR", "SYNTHETIC_SHORT", "SYNTHETIC_LONG"]: return "BOTH"
     return "BOTH"
 
 
@@ -221,6 +256,9 @@ def get_strike_labels(strategy: str) -> list[str]:
     if strategy == "PUT_SPREAD": return ["Long Put Price", "Short Put Price"]
     if strategy == "IRON_CONDOR": return ["Long Put Price", "Short Put Price", "Short Call Price", "Long Call Price"]
     if strategy == "STRANGLE": return ["Short Put Price", "Short Call Price"]
+    if strategy == "COLLAR": return ["Long Put Strike Price", "Short Call Strike Price"]
+    if strategy == "SYNTHETIC_SHORT": return ["Long Put Strike Price", "Short Call Strike Price"]
+    if strategy == "SYNTHETIC_LONG": return ["Long Call Strike Price", "Short Put Strike Price"]
     if strategy == "CSP": return ["Short Put Price"]
     if strategy == "CC": return ["Short Call Price"]
     if strategy == "STOCK": return []
@@ -229,6 +267,7 @@ def get_strike_labels(strategy: str) -> list[str]:
 
 def validate_trade_form(option_strategy: str, sub_type, ticker: str, expiry_date, strike_values):
     errors = []
+    if not (option_strategy or "").strip(): errors.append("期权策略 为必填项")
     if not (ticker or "").strip(): errors.append("Ticker / 标的 为必填项")
     if option_strategy != "STOCK" and not sub_type: errors.append("子类型 为必填项")
     if option_strategy != "STOCK" and not expiry_date: errors.append("到期日 为必填项")
@@ -302,10 +341,21 @@ def render_detail_cards(detail_row: pd.Series, show_review: bool = True, columns
 
 
 
+    def assigned_display() -> str:
+        """复盘信息中的是否被指派：0/空不显示，1 显示“是”。"""
+        v = detail_row.get("assigned", None)
+        if pd.isna(v):
+            return ""
+        try:
+            return "是" if int(float(v)) == 1 else ""
+        except Exception:
+            return "是" if str(v).strip().lower() in {"1", "true", "yes", "是"} else ""
+
     groups = {
         "基本信息": [
+            ("标的", val("ticker")),
             ("编号", val("id")), ("持仓ID", val("position_id")), ("交易日期", val("trade_date")),
-            ("开仓日期", val("opened_date")), ("标的", val("ticker")), ("市场", val("market")),
+            ("开仓日期", val("opened_date")), ("市场", val("market")),
             ("动作", f"{val('action')} - {ACTION_LABELS.get(val('action'), val('action'))}" if val("action") else ""),
             ("策略", f"{val('option_strategy')} - {STRATEGY_LABELS.get(val('option_strategy'), val('option_strategy'))}" if val("option_strategy") else ""),
         ],
@@ -337,7 +387,7 @@ def render_detail_cards(detail_row: pd.Series, show_review: bool = True, columns
         groups["复盘信息"] = [
             ("结果状态", val("result_status")), ("平仓日期", val("closed_date")),
             ("已实现盈亏", val("closed_pnl")), ("年化收益", val("annualized_return")),
-            ("是否被指派", val("assigned")), ("执行评分", val("execution_score")),
+            ("是否被指派", assigned_display()), ("执行评分", val("execution_score")),
             ("结果归因", val("outcome_type")), ("复盘说明", val("review_note")),
         ]
 
@@ -346,7 +396,7 @@ def render_detail_cards(detail_row: pd.Series, show_review: bool = True, columns
 
     cards_html = []
     for title, items in groups.items():
-        shown = [(k, v) for k, v in items if str(v).strip()]
+        shown = [(k, v) for k, v in items if str(v).strip() or k == "关联合约"]
         if not shown: continue
         # rows_html = "".join(
         #     f'<div class="detail-card-row"><div class="detail-card-label">{html.escape(k)}</div>'
@@ -368,11 +418,29 @@ def render_detail_cards(detail_row: pd.Series, show_review: bool = True, columns
                     pass
 
             label_html = html.escape(k)
+            value_html = html.escape(str(v))
+
+            # 关联合约末尾的【现金流合计】如果为负数，只把数字显示为绿色加粗
+            if k == "关联合约":
+                raw_value = str(v)
+                if "【" in raw_value and "】" in raw_value:
+                    prefix, rest = raw_value.rsplit("【", 1)
+                    cash_text, suffix = rest.split("】", 1)
+                    try:
+                        cash_num = float(cash_text.replace(",", ""))
+                        if cash_num < 0:
+                            value_html = (
+                                f'{html.escape(prefix)}【'
+                                f'<span style="color:#16a34a;font-weight:700;">{html.escape(cash_text)}</span>'
+                                f'】{html.escape(suffix)}'
+                            )
+                    except Exception:
+                        value_html = html.escape(raw_value)
 
             rows_html_parts.append(
                 f'<div class="detail-card-row">'
                 f'<div class="detail-card-label">{label_html}</div>'
-                f'<div class="detail-card-value" style="{value_style}">{html.escape(str(v))}</div>'
+                f'<div class="detail-card-value" style="{value_style}">{value_html}</div>'
                 f'</div>'
             )
 
@@ -422,7 +490,7 @@ def related_contract_dialog(trade_id: int):
 
     # 显示当前已关联的合约信息
     current_related_text = format_related_trade_text(int(trade_id))
-    if current_related_text == "未关联":
+    if not str(current_related_text).strip():
         st.info("当前已关联：未关联")
     else:
         st.info(f"当前已关联：{current_related_text}")
@@ -808,11 +876,11 @@ def get_related_trade_icon_html(trade_id: int) -> str:
 
 def format_related_trade_text(trade_id: int) -> str:
     """
-    显示格式：合约持仓ID - 策略 - 状态 - 数量 - 行权价1
+    显示格式：合约持仓ID - 策略 - 状态 - 数量 - 行权价1 - 两合约现金流合计
     """
     row = get_related_trade_row(int(trade_id))
     if not row or row["id"] is None:
-        return "未关联"
+        return ""
 
     position_id = row["position_id"] or row["id"]
     strategy = str(row["option_strategy"] or "")
@@ -825,7 +893,23 @@ def format_related_trade_text(trade_id: int) -> str:
     except Exception:
         strike_1 = str(strike_1)
 
-    return f"{position_id} - {strategy} - {status} - {qty} - {strike_1}"
+    def _cash_value(value) -> float:
+        try:
+            if value is None or pd.isna(value):
+                return 0.0
+            return float(value)
+        except Exception:
+            return 0.0
+
+    current_cash_flow = 0.0
+    current_df = get_trade_by_id(int(trade_id))
+    if not current_df.empty:
+        current_cash_flow = _cash_value(current_df.iloc[0].get("net_cash_flow"))
+
+    related_cash_flow = _cash_value(row["net_cash_flow"] if "net_cash_flow" in row.keys() else None)
+    cash_flow_sum = current_cash_flow + related_cash_flow
+
+    return f"{position_id} - {strategy} - {status} - {qty} - {strike_1} - 【{cash_flow_sum:.2f}】"
 
 
 def get_related_candidates(current_trade_id: int) -> pd.DataFrame:
@@ -935,17 +1019,56 @@ if page == "录入交易日志":
     opened_date = top[0].date_input(req("开仓日期"), value=date.today(), key=f"top_opened_date_{trade_form_nonce}")
     trade_date = opened_date  # 隐藏“交易日期”，交易日期数据默认等于开仓日期
     expiry_date = top[1].date_input(req("到期日"), value=date.today(), key=f"top_expiry_date_{trade_form_nonce}")
-    action = top[2].selectbox(req("动作"), options=list(ACTION_LABELS.keys()), format_func=format_action, key=f"top_action_{trade_form_nonce}")
-    option_strategy = top[3].selectbox(req("期权策略"), options=list(STRATEGY_LABELS.keys()), format_func=format_strategy, key=f"top_option_strategy_{trade_form_nonce}")
+
+    # 先选策略，再根据策略限制动作和子类型；顶部顺序：期权策略 -> 动作 -> 子类型。
+    # 新增日志时默认显示空选项，避免误选第一项策略。
+    strategy_options = [""] + list(STRATEGY_LABELS.keys())
+    option_strategy = top[2].selectbox(
+        req("期权策略"),
+        options=strategy_options,
+        format_func=lambda x: "请选择期权策略" if x == "" else format_strategy(x),
+        key=f"top_option_strategy_{trade_form_nonce}",
+    )
 
     default_sub_type = DEFAULT_SUB_TYPE_BY_STRATEGY.get(option_strategy)
-    if option_strategy == "STOCK":
-        top[4].text_input("子类型", value="N/A", disabled=True, key=f"top_sub_type_na_{trade_form_nonce}")
+    if not option_strategy:
+        action = top[3].selectbox(
+            req("动作"),
+            options=[""],
+            format_func=lambda x: "请先选择期权策略",
+            disabled=True,
+            key=f"top_action_{trade_form_nonce}_EMPTY",
+        )
         sub_type = None
+        top[4].text_input(req("子类型"), value="请先选择期权策略", disabled=True, key=f"top_sub_type_empty_{trade_form_nonce}")
+    elif option_strategy == "STOCK":
+        sub_type = None
+        action_options = get_action_options_for_strategy(option_strategy, sub_type)
+        action = top[3].selectbox(
+            req("动作"),
+            options=action_options,
+            format_func=format_action,
+            key=f"top_action_{trade_form_nonce}_{option_strategy}_NA",
+        )
+        top[4].text_input("子类型", value="N/A", disabled=True, key=f"top_sub_type_na_{trade_form_nonce}")
     else:
-        sub_type_options = list(SUB_TYPE_LABELS.keys())
+        sub_type_options = get_sub_type_options_for_strategy(option_strategy)
         default_index = sub_type_options.index(default_sub_type) if default_sub_type in sub_type_options else 0
-        sub_type = top[4].selectbox(req("子类型"), options=sub_type_options, index=default_index, format_func=format_sub_type, key=f"top_sub_type_{trade_form_nonce}")
+        sub_type = top[4].selectbox(
+            req("子类型"),
+            options=sub_type_options,
+            index=default_index,
+            format_func=format_sub_type,
+            key=f"top_sub_type_{trade_form_nonce}_{option_strategy}",
+        )
+
+        action_options = get_action_options_for_strategy(option_strategy, sub_type)
+        action = top[3].selectbox(
+            req("动作"),
+            options=action_options,
+            format_func=format_action,
+            key=f"top_action_{trade_form_nonce}_{option_strategy}_{sub_type or 'NA'}",
+        )
 
     with st.form(f"trade_form_{trade_form_nonce}", clear_on_submit=True):
         # 第1行：Ticker/标的，到期日，标的价格，手续费，DTE
@@ -964,7 +1087,10 @@ if page == "录入交易日志":
         premium = r3[0].number_input("权利金 / 单价", value=0.0, step=0.01)
         strike_labels = get_strike_labels(option_strategy)
         strike_values = [None] * 4
-        if option_strategy == "STOCK":
+        if not option_strategy:
+            for i in range(1, 5):
+                r3[i].text_input("", value="", disabled=True, key=f"strike_strategy_empty_{i}_{trade_form_nonce}")
+        elif option_strategy == "STOCK":
             for i in range(1, 5):
                 r3[i].text_input("", value="", disabled=True, key=f"strike_stock_empty_{i}_{trade_form_nonce}")
         else:
@@ -995,8 +1121,11 @@ if page == "录入交易日志":
         # 第5行：保证金需求，方向，数量，乘数，策略标签
         r6 = st.columns(5)
         margin_req = r6[0].number_input("保证金需求", value=0.0, step=1.0)
-        option_right_default = get_default_option_right(option_strategy)
-        option_right = r6[1].selectbox("方向", OPTION_RIGHTS, index=OPTION_RIGHTS.index(option_right_default))
+
+        # 方向由期权策略自动确定，避免手动选择导致后续盈亏平衡等计算误判。
+        option_right = get_default_option_right(option_strategy) if option_strategy else ""
+        r6[1].text_input("方向", value=option_right, disabled=True)
+
         qty = r6[2].number_input(req("数量"), min_value=1, value=1)
         multiplier = r6[3].number_input(req("乘数"), min_value=1, value=100)
         strategy_tag = r6[4].text_input("策略标签", value="")
@@ -1392,13 +1521,37 @@ elif page == "交易日志显示":
             if col == "result_status" and str(value).upper() == "OPEN":
                 row_class = "trade-row trade-open"
 
-            # 到期日距离今天 0~3 天：蓝色加粗
+            # 到期日高亮规则：仅 OPEN 合约适用
+            # 1) 非 OPEN 合约：不高亮，保持默认黑色字体
+            # 2) 当前日期 > 到期日：不高亮，保持默认黑色字体
+            # 3) 到期日距离今天 0~3 天：红色加粗
+            # 4) 当前时间已经超过“交易日 -> 到期日”周期的一半：蓝色加粗
+            #    例如 DTE=10，交易后过了 5 天，则到期日蓝色加粗
             if col == "expiry_date" and str(value).strip():
                 try:
-                    exp_date = pd.to_datetime(value).date()
-                    days_left = (exp_date - date.today()).days
-                    if 0 <= days_left <= 5:
-                        style_extra = "color:#2563eb;font-weight:700;"
+                    row_status = str(row.get("result_status", "")).upper()
+
+                    if row_status == "OPEN":
+                        exp_date = pd.to_datetime(value).date()
+                        today_date = date.today()
+                        days_left = (exp_date - today_date).days
+
+                        if days_left < 0:
+                            # 已经过期，不再高亮，保持默认黑色字体
+                            style_extra = ""
+                        elif 0 <= days_left <= 3:
+                            style_extra = "color:#dc2626;font-weight:700;"
+                        else:
+                            trade_date_value = row.get("trade_date", "") or row.get("opened_date", "")
+                            trade_dt = pd.to_datetime(trade_date_value, errors="coerce")
+
+                            if pd.notna(trade_dt):
+                                trade_dt = trade_dt.date()
+                                total_days = (exp_date - trade_dt).days
+                                elapsed_days = (today_date - trade_dt).days
+
+                                if total_days > 0 and 0 <= elapsed_days <= total_days and elapsed_days >= total_days / 2:
+                                    style_extra = "color:#2563eb;font-weight:700;"
                 except Exception:
                     pass
 
@@ -1551,29 +1704,33 @@ elif page == "修改交易日志":
             current_sub_type = target_trade.get("sub_type")
             current_expiry = as_date(target_trade.get("expiry_date"), date.today())
             strike_labels = get_strike_labels(current_strategy)
-            default_option_right = str(target_trade.get("option_right") or get_default_option_right(current_strategy))
-
             with st.form(f"edit_trade_form_{int(target_trade_id)}"):
                 top = st.columns(5)
                 trade_date = top[0].date_input(req("交易日期"), value=as_date(target_trade.get("trade_date"), date.today()))
                 opened_date = top[1].date_input(req("开仓日期"), value=as_date(target_trade.get("opened_date"), date.today()))
-                action_options = list(ACTION_LABELS.keys())
-                action_value = str(target_trade.get("action") or action_options[0])
-                action_index = action_options.index(action_value) if action_value in action_options else 0
-                action = top[2].selectbox(req("动作"), options=action_options, index=action_index, format_func=format_action)
-
                 strategy_options = list(STRATEGY_LABELS.keys())
                 strategy_index = strategy_options.index(current_strategy) if current_strategy in strategy_options else 0
-                option_strategy = top[3].selectbox(req("期权策略"), options=strategy_options, index=strategy_index, format_func=format_strategy)
+
+                # 先选策略，再根据策略限制动作和子类型；顶部顺序：期权策略 -> 动作 -> 子类型。
+                option_strategy = top[2].selectbox(req("期权策略"), options=strategy_options, index=strategy_index, format_func=format_strategy)
 
                 if option_strategy == "STOCK":
-                    top[4].text_input("子类型", value="N/A", disabled=True)
                     sub_type = None
+                    action_options = get_action_options_for_strategy(option_strategy, sub_type)
+                    action_value = str(target_trade.get("action") or action_options[0])
+                    action_index = action_options.index(action_value) if action_value in action_options else 0
+                    action = top[3].selectbox(req("动作"), options=action_options, index=action_index, format_func=format_action)
+                    top[4].text_input("子类型", value="N/A", disabled=True)
                 else:
-                    sub_type_options = list(SUB_TYPE_LABELS.keys())
+                    sub_type_options = get_sub_type_options_for_strategy(option_strategy)
                     default_sub_type = str(current_sub_type or DEFAULT_SUB_TYPE_BY_STRATEGY.get(option_strategy) or sub_type_options[0])
                     sub_type_index = sub_type_options.index(default_sub_type) if default_sub_type in sub_type_options else 0
                     sub_type = top[4].selectbox(req("子类型"), options=sub_type_options, index=sub_type_index, format_func=format_sub_type)
+
+                    action_options = get_action_options_for_strategy(option_strategy, sub_type)
+                    action_value = str(target_trade.get("action") or action_options[0])
+                    action_index = action_options.index(action_value) if action_value in action_options else 0
+                    action = top[3].selectbox(req("动作"), options=action_options, index=action_index, format_func=format_action)
 
                 # 第1行：Ticker/标的，到期日，标的价格，手续费，DTE
                 r2 = st.columns(5)
@@ -1638,11 +1795,11 @@ elif page == "修改交易日志":
                 # 第5行：保证金需求，方向，数量，乘数，策略标签
                 r6 = st.columns(5)
                 margin_req = r6[0].number_input("保证金需求", value=float(target_trade.get("margin_req") or 0.0), step=1.0)
-                option_right_default = get_default_option_right(option_strategy)
-                option_right_options = list(OPTION_RIGHTS)
-                option_right_value = default_option_right if default_option_right in option_right_options else option_right_default
-                option_right_index = option_right_options.index(option_right_value) if option_right_value in option_right_options else 0
-                option_right = r6[1].selectbox("方向", option_right_options, index=option_right_index)
+
+                # 修改页同样由期权策略自动确定方向；如果切换策略，会自动改为对应方向。
+                option_right = get_default_option_right(option_strategy)
+                r6[1].text_input("方向", value=option_right, disabled=True)
+
                 qty = r6[2].number_input(req("数量"), min_value=1, value=int(target_trade.get("qty") or 1))
                 multiplier = r6[3].number_input(req("乘数"), min_value=1, value=int(target_trade.get("multiplier") or 100))
                 strategy_tag = r6[4].text_input("策略标签", value=str(target_trade.get("strategy_tag") or ""))
@@ -1829,6 +1986,8 @@ elif page == "交易日志回填":
 
         trade_id_int = int(target_trade["id"])
         action = str(target_trade.get("action") or "").upper()
+        option_strategy = str(target_trade.get("option_strategy") or "").upper()
+        is_combo_strategy = option_strategy in COMBO_STRATEGIES
         qty = int(target_trade.get("qty") or 1)
         multiplier = int(target_trade.get("multiplier") or 100)
         premium = float(target_trade.get("premium") or 0.0)
@@ -1860,18 +2019,29 @@ elif page == "交易日志回填":
         execution_score = c4.selectbox(req("是否按计划执行"), EXECUTION_SCORES, index=EXECUTION_SCORES.index(str(target_trade.get("execution_score") or "YES")), key=exec_key)
 
         c5, c6, c7 = st.columns(3)
-        close_price = c5.number_input(
-            "平仓成交价格",
-            min_value=0.0,
-            step=0.01,
-            key=close_key,
-            on_change=update_backfill_pnl,
-            args=(trade_id_int, action, premium, qty, multiplier),
-        )
+        if is_combo_strategy:
+            close_price = c5.number_input(
+                "平仓成交价格 / 组合净价",
+                min_value=0.0,
+                step=0.01,
+                key=close_key,
+                help="组合策略不使用单腿公式自动计算盈亏；这里可记录组合平仓净价，已实现盈亏请手动填写。",
+            )
+        else:
+            close_price = c5.number_input(
+                "平仓成交价格",
+                min_value=0.0,
+                step=0.01,
+                key=close_key,
+                on_change=update_backfill_pnl,
+                args=(trade_id_int, action, premium, qty, multiplier),
+            )
         closed_pnl = c6.number_input(req("已实现盈亏"), step=1.0, key=pnl_key)
         outcome_type = c7.selectbox(req("结果归因"), OUTCOME_TYPES, index=OUTCOME_TYPES.index(str(target_trade.get("outcome_type") or OUTCOME_TYPES[0])), key=outcome_key)
 
-        if action == "BTO":
+        if is_combo_strategy:
+            st.info("组合策略（Collar / 合成空头 / 合成多头）：不使用单腿权利金公式自动计算，请直接填写组合已实现盈亏。")
+        elif action == "BTO":
             st.caption("自动公式：已实现盈亏 = (平仓成交价格 - 开仓权利金) × 数量 × 乘数")
         elif action == "STO":
             st.caption("自动公式：已实现盈亏 = (开仓权利金 - 平仓成交价格) × 数量 × 乘数")
