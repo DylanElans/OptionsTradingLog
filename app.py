@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 import html
 import sqlite3
 
@@ -123,7 +123,7 @@ if "pending_nav" in st.session_state:
     st.session_state["nav_page"] = st.session_state["pending_nav"]
     del st.session_state["pending_nav"]
 
-nav_options = ["录入交易日志", "交易日志显示", "修改交易日志", "交易日志回填", "日志回收站", "资金流水录入", "资金流水查看", "统计总结"]
+nav_options = ["录入交易日志", "交易日志显示", "修改交易日志", "交易日志回填", "日志回收站", "资金流水录入", "资金流水查看", "统计总结", "常用链接"]
 
 if "nav_page" not in st.session_state or st.session_state["nav_page"] not in nav_options:
     st.session_state["nav_page"] = "交易日志显示"
@@ -190,13 +190,74 @@ def generate_position_id_by_trade_date(trade_date_value) -> str:
     return f"{date_str}{next_seq:02d}"
 
 
+def format_execution_symbol(row) -> str:
+    """日志列表用简短腿型显示执行方向：+C/-C/+P/-P。
+
+    仅用于展示，不改变数据库字段和任何盈亏计算。
+    """
+    strategy = str(row.get("option_strategy") or "").upper()
+    action = str(row.get("action") or "").upper()
+
+    if strategy == "CALL":
+        return "+C" if action == "BTO" else "-C"
+    if strategy in ["PUT", "CSP"]:
+        return "+P" if action == "BTO" else "-P"
+    if strategy in ["SYNTHETIC_SHORT", "COLLAR"]:
+        return "+P -C"
+    if strategy == "SYNTHETIC_LONG":
+        return "+C -P"
+    if strategy == "CALL_SPREAD":
+        return "+C -C"
+    if strategy == "PUT_SPREAD":
+        return "+P -P"
+    if strategy == "IRON_CONDOR":
+        return "+P -P -C +C"
+    if strategy == "STRANGLE":
+        return "-P -C"
+    if strategy == "CC":
+        return "-C"
+    if strategy == "STOCK":
+        return "买股" if action == "BUY_SHARES" else "卖股"
+    return action
+
+
+def get_strike_leg_symbols(row) -> list[str]:
+    """合约信息卡片里给执行价加腿型前缀，如 +P/-C。
+
+    仅用于展示，不改变数据库字段和任何盈亏计算。
+    """
+    strategy = str(row.get("option_strategy") or "").upper()
+    action = str(row.get("action") or "").upper()
+
+    if strategy == "CALL":
+        return ["+C" if action == "BTO" else "-C"]
+    if strategy in ["PUT", "CSP"]:
+        return ["+P" if action == "BTO" else "-P"]
+    if strategy in ["SYNTHETIC_SHORT", "COLLAR"]:
+        return ["+P", "-C"]
+    if strategy == "SYNTHETIC_LONG":
+        return ["+C", "-P"]
+    if strategy == "CALL_SPREAD":
+        return ["+C", "-C"]
+    if strategy == "PUT_SPREAD":
+        return ["+P", "-P"]
+    if strategy == "IRON_CONDOR":
+        return ["+P", "-P", "-C", "+C"]
+    if strategy == "STRANGLE":
+        return ["-P", "-C"]
+    if strategy == "CC":
+        return ["-C"]
+    return []
+
+
 def display_trade_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     out = df.copy()
     out["action_display"] = out["action"].fillna("").map(lambda x: f"{x} - {ACTION_LABELS.get(x, x)}")
-    out["strategy_display"] = out["option_strategy"].fillna("").map(lambda x: f"{x} - {STRATEGY_LABELS.get(x, x)}")
-    out["sub_type_display"] = out["sub_type"].fillna("").map(lambda x: f"{x} - {SUB_TYPE_LABELS.get(x, x)}" if x else "")
+    out["execution_display"] = out.apply(format_execution_symbol, axis=1)
+    out["strategy_display"] = out["option_strategy"].fillna("").map(lambda x: STRATEGY_LABELS.get(x, x) if x else "")
+    out["sub_type_display"] = out["sub_type"].fillna("").map(lambda x: str(x) if x else "")
     return out
 
 
@@ -292,7 +353,7 @@ def validate_backfill_form(closed_date, result_status, execution_score, closed_p
 def zh_col_name(col: str) -> str:
     mapping = {
         "id": "ID", "trade_date": "交易日期", "position_id": "编号", "ticker": "标的",
-        "action_display": "动作", "strategy_display": "策略", "sub_type_display": "子类型",
+        "action_display": "动作", "execution_display": "执行", "strategy_display": "策略", "sub_type_display": "子类型",
         "expiry_date": "到期日", "strike_price": "执行价1", "strike_price_2": "执行价2",
         "strike_price_3": "执行价3", "strike_price_4": "执行价4", "qty": "数量",
         "premium": "权利金", "fees": "手续费", "net_cash_flow": "净现金流",
@@ -341,6 +402,15 @@ def render_detail_cards(detail_row: pd.Series, show_review: bool = True, columns
 
 
 
+    strike_leg_symbols = get_strike_leg_symbols(detail_row)
+
+    def strike_val(field: str, index: int) -> str:
+        value = val(field)
+        if not value:
+            return ""
+        symbol = strike_leg_symbols[index] if index < len(strike_leg_symbols) else ""
+        return f"{symbol} {value}".strip()
+
     def assigned_display() -> str:
         """复盘信息中的是否被指派：0/空不显示，1 显示“是”。"""
         v = detail_row.get("assigned", None)
@@ -362,8 +432,8 @@ def render_detail_cards(detail_row: pd.Series, show_review: bool = True, columns
         "合约信息": [
             ("子类型", f"{val('sub_type')} - {SUB_TYPE_LABELS.get(val('sub_type'), val('sub_type'))}" if val("sub_type") else ""),
             ("到期日", val("expiry_date")),
-            ("执行价1", val("strike_price")), ("执行价2", val("strike_price_2")),
-            ("执行价3", val("strike_price_3")), ("执行价4", val("strike_price_4")),
+            ("执行价1", strike_val("strike_price", 0)), ("执行价2", strike_val("strike_price_2", 1)),
+            ("执行价3", strike_val("strike_price_3", 2)), ("执行价4", strike_val("strike_price_4", 3)),
             ("方向", val("option_right")), ("DTE", val("dte")),
             ("关联合约", format_related_trade_text(int(detail_row.get("id")))),
             ("开仓理由", val("entry_reason")),
@@ -414,6 +484,16 @@ def render_detail_cards(detail_row: pd.Series, show_review: bool = True, columns
                     num_value = float(str(v).replace(",", ""))
                     if num_value < 0:
                         value_style = "color:#16a34a;"
+                except Exception:
+                    pass
+
+            if k == "已实现盈亏":
+                try:
+                    num_value = float(str(v).replace(",", ""))
+                    if num_value > 0:
+                        value_style = "color:#dc2626;font-weight:700;"
+                    elif num_value < 0:
+                        value_style = "color:#16a34a;font-weight:700;"
                 except Exception:
                     pass
 
@@ -476,7 +556,7 @@ def edit_review_dialog(trade_id: int, current_note: str):
 @st.dialog("管理关联合约")
 def related_contract_dialog(trade_id: int):
     ensure_related_trade_column()
-
+    st.write(f"用于自定义多腿策略时关联相关合约")
     current_df = get_trade_by_id(int(trade_id))
     if current_df.empty:
         st.warning("未找到当前交易。")
@@ -703,6 +783,19 @@ def _sqlite_connect():
     return conn
 
 
+def ensure_trade_indexes():
+    """为交易日志列表常用筛选字段和关联合约字段创建索引。"""
+    ensure_related_trade_column()
+    with _sqlite_connect() as conn:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_result_status ON trades(result_status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_trade_date ON trades(trade_date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_option_strategy ON trades(option_strategy)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_sub_type ON trades(sub_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_related_trade_id ON trades(related_trade_id)")
+        conn.commit()
+
+
 
 def ensure_related_trade_column():
     """为关联合约准备字段；已存在则忽略。"""
@@ -854,9 +947,34 @@ def get_related_trade_color(trade_id: int) -> str:
     return colors[color_index]
 
 
-def get_related_trade_icon_html(trade_id: int) -> str:
-    """返回可变色的关联合约图标 HTML。注意：emoji 图标本身通常不能被 CSS 改色，所以这里用 SVG 链接图标。"""
-    color = get_related_trade_color(int(trade_id))
+def get_related_pair_color(trade_id: int, related_id) -> str:
+    """根据当前记录ID和关联记录ID返回稳定颜色；避免列表逐行查询数据库。"""
+    try:
+        current_id = int(trade_id)
+        related_id = int(related_id)
+    except Exception:
+        return ""
+
+    pair_a, pair_b = sorted([current_id, related_id])
+    colors = [
+        "#2563eb",  # blue
+        "#16a34a",  # green
+        "#dc2626",  # red
+        "#9333ea",  # purple
+        "#ea580c",  # orange
+        "#0891b2",  # cyan
+        "#be123c",  # rose
+        "#4f46e5",  # indigo
+        "#65a30d",  # lime
+        "#b45309",  # amber
+    ]
+    color_index = (pair_a * 31 + pair_b * 17) % len(colors)
+    return colors[color_index]
+
+
+def get_related_trade_icon_html(trade_id: int, related_id=None) -> str:
+    """返回可变色的关联合约图标 HTML。related_id 存在时不再查询数据库。"""
+    color = get_related_pair_color(int(trade_id), related_id) if related_id is not None else get_related_trade_color(int(trade_id))
     if not color:
         return ""
 
@@ -872,6 +990,45 @@ def get_related_trade_icon_html(trade_id: int) -> str:
         f'</svg>'
         f'</span>'
     )
+
+
+def add_related_info_to_df(df: pd.DataFrame) -> pd.DataFrame:
+    """一次性用 SQL 给交易列表补充 has_related / related_id，避免每行查询数据库。"""
+    if df.empty or "id" not in df.columns:
+        return df
+
+    ensure_related_trade_column()
+    out = df.copy()
+    ids = [int(x) for x in out["id"].dropna().astype(int).tolist()]
+    if not ids:
+        out["has_related"] = 0
+        out["related_id"] = None
+        return out
+
+    placeholders = ",".join(["?"] * len(ids))
+    sql = f"""
+        SELECT
+            t.id AS id,
+            CASE
+                WHEN r1.id IS NOT NULL OR r2.id IS NOT NULL THEN 1
+                ELSE 0
+            END AS has_related,
+            COALESCE(r1.id, r2.id) AS related_id
+        FROM trades t
+        LEFT JOIN trades r1 ON r1.id = t.related_trade_id
+        LEFT JOIN trades r2 ON r2.related_trade_id = t.id
+        WHERE t.id IN ({placeholders})
+    """
+
+    with _sqlite_connect() as conn:
+        related_df = pd.read_sql_query(sql, conn, params=ids)
+
+    if related_df.empty:
+        out["has_related"] = 0
+        out["related_id"] = None
+        return out
+
+    return out.merge(related_df, on="id", how="left")
 
 
 def format_related_trade_text(trade_id: int) -> str:
@@ -997,6 +1154,62 @@ def permanently_delete_trade(trade_id: int):
         conn.execute("DELETE FROM trades WHERE id = ?", (int(trade_id),))
         conn.commit()
 
+
+
+
+def ensure_common_links_table():
+    """创建常用链接表；只在不存在时创建，不影响其它数据表。"""
+    with _sqlite_connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS common_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                url TEXT NOT NULL,
+                description TEXT
+            )
+            """
+        )
+        conn.commit()
+
+
+def insert_common_link(url: str, description: str):
+    ensure_common_links_table()
+    url = (url or "").strip()
+    description = (description or "").strip()
+    if not url:
+        return
+    if not url.lower().startswith(("http://", "https://")):
+        url = "https://" + url
+    with _sqlite_connect() as conn:
+        conn.execute(
+            "INSERT INTO common_links (created_at, url, description) VALUES (?, ?, ?)",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), url, description),
+        )
+        conn.commit()
+
+
+def delete_common_link(link_id: int):
+    ensure_common_links_table()
+    with _sqlite_connect() as conn:
+        conn.execute("DELETE FROM common_links WHERE id = ?", (int(link_id),))
+        conn.commit()
+
+
+def get_common_links() -> pd.DataFrame:
+    ensure_common_links_table()
+    with _sqlite_connect() as conn:
+        return pd.read_sql_query(
+            "SELECT id, created_at, url, description FROM common_links ORDER BY created_at DESC, id DESC",
+            conn,
+        )
+
+
+def format_common_link_seq(created_at: str, link_id: int) -> str:
+    dt = pd.to_datetime(created_at, errors="coerce")
+    if pd.isna(dt):
+        return str(link_id)
+    return dt.strftime("%Y%m%d%H%M")
 
 # ====================== 页面逻辑 ======================
 
@@ -1331,6 +1544,109 @@ elif page == "日志回收站":
                         st.rerun()
 
 
+
+elif page == "常用链接":
+    st.subheader("常用链接")
+    ensure_common_links_table()
+
+    if "selected_common_link_id" not in st.session_state:
+        st.session_state.selected_common_link_id = None
+    if "common_link_form_nonce" not in st.session_state:
+        st.session_state.common_link_form_nonce = 0
+    if st.session_state.get("pending_clear_common_link_form", False):
+        st.session_state.common_link_form_nonce += 1
+        st.session_state.pending_clear_common_link_form = False
+
+    common_link_form_nonce = st.session_state.common_link_form_nonce
+
+    input_cols = st.columns([5, 2.2, 1.2, 1.2])
+    link_url = input_cols[0].text_input("链接", key=f"common_link_url_{common_link_form_nonce}")
+    link_desc = input_cols[1].text_input("说明", key=f"common_link_desc_{common_link_form_nonce}")
+    # 用自定义 label，避免 st.markdown 默认段落边距把按钮挤得偏下
+    input_cols[2].markdown(
+        "<div style='height:26px; line-height:26px; font-weight:400; font-size:14px;'>操作</div>",
+        unsafe_allow_html=True,
+    )
+    input_cols[3].markdown(
+        "<div style='height:26px; line-height:26px;'>&nbsp;</div>",
+        unsafe_allow_html=True,
+    )
+
+    if input_cols[2].button("增加", type="primary", use_container_width=True):
+        if not str(link_url).strip():
+            st.warning("请先输入链接。")
+        else:
+            insert_common_link(link_url, link_desc)
+            st.session_state.selected_common_link_id = None
+            st.session_state.pending_clear_common_link_form = True
+            st.success("链接已增加。")
+            st.rerun()
+
+    delete_disabled = st.session_state.selected_common_link_id is None
+    if input_cols[3].button("删除", disabled=delete_disabled, use_container_width=True):
+        delete_common_link(int(st.session_state.selected_common_link_id))
+        st.session_state.selected_common_link_id = None
+        st.success("链接已删除。")
+        st.rerun()
+
+    links_df = get_common_links()
+    if links_df.empty:
+        st.info("暂无常用链接。")
+    else:
+        header_cols = st.columns([0.7, 2.2, 6.0, 1.5])
+        header_cols[0].markdown('<div class="trade-header">选择</div>', unsafe_allow_html=True)
+        header_cols[1].markdown('<div class="trade-header">说明</div>', unsafe_allow_html=True)
+        header_cols[2].markdown('<div class="trade-header">链接</div>', unsafe_allow_html=True)
+        header_cols[3].markdown('<div class="trade-header">日期</div>', unsafe_allow_html=True)
+
+        link_ids = links_df["id"].astype(int).tolist()
+        current_selected = st.session_state.selected_common_link_id
+        if current_selected not in link_ids:
+            st.session_state.selected_common_link_id = None
+            current_selected = None
+
+        def handle_common_link_select(link_id: int, all_link_ids: list[int]):
+            key = f"common_link_select_{link_id}"
+            checked = bool(st.session_state.get(key, False))
+            if checked:
+                st.session_state.selected_common_link_id = int(link_id)
+                for other_id in all_link_ids:
+                    st.session_state[f"common_link_select_{other_id}"] = (int(other_id) == int(link_id))
+            else:
+                if st.session_state.get("selected_common_link_id") == int(link_id):
+                    st.session_state.selected_common_link_id = None
+                st.session_state[key] = False
+
+        for link_id in link_ids:
+            st.session_state[f"common_link_select_{link_id}"] = (current_selected == link_id)
+
+        for _, row in links_df.iterrows():
+            link_id = int(row["id"])
+            row_cols = st.columns([0.7, 2.2, 6.0, 1.5])
+            row_cols[0].checkbox(
+                "",
+                key=f"common_link_select_{link_id}",
+                on_change=handle_common_link_select,
+                args=(link_id, link_ids),
+                label_visibility="collapsed",
+            )
+
+            seq = format_common_link_seq(row.get("created_at", ""), link_id)
+            url = str(row.get("url") or "")
+            desc = str(row.get("description") or "")
+            safe_seq = html.escape(seq)
+            safe_url_text = html.escape(url)
+            safe_url_href = html.escape(url, quote=True)
+            safe_desc = html.escape(desc)
+
+            row_cols[1].markdown(f'<div class="trade-row">{safe_desc}</div>', unsafe_allow_html=True)
+            row_cols[2].markdown(
+                f'<div class="trade-row"><a href="{safe_url_href}" target="_blank">{safe_url_text}</a></div>',
+                unsafe_allow_html=True,
+            )
+            row_cols[3].markdown(f'<div class="trade-row">{safe_seq}</div>', unsafe_allow_html=True)
+
+
 elif page == "资金流水录入":
     st.subheader("资金流水录入")
     st.caption(":red[*] 为必填项")
@@ -1368,11 +1684,11 @@ elif page == "交易日志显示":
         st.session_state.need_clear_selection = False
 
     today = date.today()
-    default_start = today - timedelta(days=30)
 
     c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 2, 1.5, 1.5, 1.5, 1.5, 1])
-    start_date = c1.date_input("开始日期", value=default_start, key="log_start_date")
-    end_date = c2.date_input("结束日期", value=today, key="log_end_date")
+    # 初始化不设置日期过滤：默认显示所有 OPEN 记录；需要时再手动选择开始/结束日期。
+    start_date = c1.date_input("开始日期", value=None, key="log_start_date")
+    end_date = c2.date_input("结束日期", value=None, key="log_end_date")
     ticker_filter = c3.text_input("Ticker筛选", key="ticker_filter")
     status_options = ["ALL"] + RESULT_STATUSES
     default_status_index = status_options.index("OPEN") if "OPEN" in status_options else 0
@@ -1381,6 +1697,11 @@ elif page == "交易日志显示":
                                    format_func=lambda x: x if x == "ALL" else format_strategy(x), key="strategy_filter")
     sub_type_filter = c6.selectbox("子类型", ["ALL"] + list(SUB_TYPE_LABELS.keys()), 
                                    format_func=lambda x: x if x == "ALL" else format_sub_type(x), key="sub_type_filter")
+    # 用自定义 label，避免 st.markdown 默认段落边距把按钮挤得偏下
+    c7.markdown(
+        "<div style='height:26px; line-height:26px; font-weight:400; font-size:14px;'>操作</div>",
+        unsafe_allow_html=True,
+    )
 
     if c7.button("🔄 刷新数据", key="refresh_btn"):
         st.session_state.need_clear_selection = True
@@ -1415,9 +1736,11 @@ elif page == "交易日志显示":
     if sub_type_filter != "ALL": clauses.append("sub_type = :sub_type"); params["sub_type"] = sub_type_filter
 
     where_sql = " AND ".join(clauses) if clauses else None
+    ensure_trade_indexes()
     df = get_trades(where_sql, params)
     if not df.empty and "is_deleted" in df.columns:
         df = df[pd.to_numeric(df["is_deleted"], errors="coerce").fillna(0).astype(int) == 0]
+    df = add_related_info_to_df(df)
     show_df = display_trade_df(df)
 
     page_size = 15
@@ -1454,7 +1777,6 @@ elif page == "交易日志显示":
         "result_status",      # 状态        
         "net_cash_flow",      # 净现金流
         "expiry_date",        # 到期日
-        "action_display",     # 动作        
         "sub_type_display",   # 子类型
         "premium",            # 权利金
         "strike_price",       # 执行价1
@@ -1477,7 +1799,6 @@ elif page == "交易日志显示":
     1.0,   # 状态
     1.2,   # 净现金流
     1.1,   # 到期日
-    1.5,   # 动作
     1.5,   # 子类型
     1.0,   # 权利金
     1.0,   # 执行价1
@@ -1579,12 +1900,32 @@ elif page == "交易日志显示":
             else:
                 display_value = str(value)
 
+            # 日志列表中，在执行价列前增加腿型前缀，例如 +P 100.00 / -C 160.00
+            strike_symbol_map = {
+                "strike_price": 0,
+                "strike_price_2": 1,
+                "strike_price_3": 2,
+                "strike_price_4": 3,
+            }
+            if col in strike_symbol_map and str(display_value).strip():
+                leg_symbols = get_strike_leg_symbols(row)
+                leg_index = strike_symbol_map[col]
+                if leg_index < len(leg_symbols) and str(leg_symbols[leg_index]).strip():
+                    display_value = f"{leg_symbols[leg_index]} {display_value}"
+
             # 已关联合约的记录，在“标的”列增加统一“链接”图标；不同关联对使用不同颜色
             display_html = html.escape(str(display_value))
-            if col == "ticker" and has_related_trade(rid):
-                related_icon_html = get_related_trade_icon_html(rid)
-                if related_icon_html:
-                    display_html = f'{html.escape(str(display_value))} {related_icon_html}'
+            if col == "ticker":
+                try:
+                    related_flag = int(float(row.get("has_related", 0) or 0)) == 1
+                except Exception:
+                    related_flag = False
+
+                related_id = row.get("related_id", None)
+                if related_flag and not pd.isna(related_id):
+                    related_icon_html = get_related_trade_icon_html(rid, related_id)
+                    if related_icon_html:
+                        display_html = f'{html.escape(str(display_value))} {related_icon_html}'
 
             # 普通文本显示，不再给 position_id 增加链接
             row_cols[i].markdown(
