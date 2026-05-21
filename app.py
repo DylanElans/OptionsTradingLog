@@ -357,7 +357,7 @@ def zh_col_name(col: str) -> str:
         "expiry_date": "到期日", "strike_price": "执行价1", "strike_price_2": "执行价2",
         "strike_price_3": "执行价3", "strike_price_4": "执行价4", "qty": "数量",
         "premium": "权利金", "fees": "手续费", "net_cash_flow": "净现金流",
-        "result_status": "状态", "closed_pnl": "已实现盈亏",
+        "result_status": "状态", "closed_pnl": "已实现盈亏", "closed_date": "平仓日期",
     }
     return mapping.get(col, col)
 
@@ -1774,9 +1774,9 @@ elif page == "交易日志显示":
         "position_id",        # 编号
         "ticker",             # 标的
         "strategy_display",   # 策略
+        "expiry_date",        # 到期日
         "result_status",      # 状态        
         "net_cash_flow",      # 净现金流
-        "expiry_date",        # 到期日
         "sub_type_display",   # 子类型
         "premium",            # 权利金
         "strike_price",       # 执行价1
@@ -1784,9 +1784,9 @@ elif page == "交易日志显示":
         "strike_price_3",     # 执行价3
         "strike_price_4",     # 执行价4
         "qty",                # 数量
-        "fees",               # 手续费
         "closed_pnl",         # 已实现盈亏
         "trade_date",         # 交易日期
+        "closed_date",        # 平仓日期
     ]
 
     table_cols = [c for c in table_cols if c in page_df.columns]
@@ -1796,9 +1796,9 @@ elif page == "交易日志显示":
     1.2,   # 编号
     1.2,   # 标的
     1.5,   # 策略
+    1.1,   # 到期日
     1.0,   # 状态
     1.2,   # 净现金流
-    1.1,   # 到期日
     1.5,   # 子类型
     1.0,   # 权利金
     1.0,   # 执行价1
@@ -1806,9 +1806,9 @@ elif page == "交易日志显示":
     1.0,   # 执行价3
     1.0,   # 执行价4
     0.8,   # 数量
-    0.9,   # 手续费
     1.1,   # 已实现盈亏
     1.2,   # 交易日期
+    1.2,   # 平仓日期
 ]
 
     visible_ids = page_df["id"].astype(int).tolist() if not page_df.empty else []
